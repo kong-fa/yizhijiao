@@ -55,10 +55,6 @@ final_submit_selected = False
 scroll_amount = -3         # 滚动量，负值表示向下滚动
 current_question = 1       # 当前题目序号
 
-# 新增题号相关变量
-question_number_rect = None    # 题号区域
-question_number_selected = False
-
 def toggle_grading():
     global running
     running = not running
@@ -1226,13 +1222,25 @@ def toggle_improved_scoring():
         btn_start_multipage.config(text="停止打分", bg="red")
         status_label.config(text="状态：正在执行智能打分")
         
-        # 检查OCR是否可用，选择相应的方法
-        if OCR_AVAILABLE and os.path.exists(pytesseract.pytesseract.tesseract_cmd):
-            log_message("启动基于OCR的题号智能打分")
-            threading.Thread(target=question_based_scoring, daemon=True).start()
-        else:
-            log_message("OCR不可用，使用模板匹配方法打分")
-            threading.Thread(target=question_based_scoring_without_ocr, daemon=True).start()
+        # 检查是否已选择分数输入框
+        if not score_input_selected:
+            messagebox.showwarning("警告", "请先选择分数输入框区域")
+            running = False
+            btn_start_multipage.config(text="开始多题目打分", bg="purple")
+            status_label.config(text="状态：已停止打分")
+            return
+            
+        # 检查是否已选择最终提交按钮
+        if not final_submit_selected:
+            messagebox.showwarning("警告", "请先选择最终提交按钮区域")
+            running = False
+            btn_start_multipage.config(text="开始多题目打分", bg="purple")
+            status_label.config(text="状态：已停止打分")
+            return
+        
+        # 使用简化版的打分方法
+        log_message("启动简化版多题目打分")
+        threading.Thread(target=simplified_scoring, daemon=True).start()
     else:
         # 停止打分
         running = False
@@ -1240,252 +1248,9 @@ def toggle_improved_scoring():
         status_label.config(text="状态：已停止打分")
         log_message("已停止智能打分")
 
-def select_question_number_area():
-    """选择题号文本区域"""
-    global question_number_rect, question_number_selected
-    
-    log_message('请选择一个题号区域（如"第1题:"）')
-    
-    question_number_rect = capture_screen_region("选择题号区域")
-    
-    if question_number_rect:
-        question_number_selected = True
-        log_message(f"题号区域已选择: {question_number_rect}")
-        
-        # 截取并保存题号图像，用于调试
-        left, top, right, bottom = question_number_rect
-        img = pyautogui.screenshot(region=(left, top, right-left, bottom-top))
-        img_path = os.path.join(IMAGE_DIR, "question_number.png")
-        img.save(img_path)
-        log_message(f"题号图像已保存: {img_path}")
-    else:
-        log_message("题号区域选择已取消")
-
-def find_all_question_numbers():
-    """识别当前屏幕上所有的题号"""
-    try:
-        # 截取整个屏幕
-        screen = pyautogui.screenshot()
-        screen_np = np.array(screen)
-        screen_bgr = cv2.cvtColor(screen_np, cv2.COLOR_RGB2BGR)
-        
-        question_numbers = []
-        
-        # 如果OCR可用，使用OCR识别题号
-        if OCR_AVAILABLE and question_number_selected:
-            # 先截取一个宽范围的区域
-            # 假设题号集中在屏幕的左半部分
-            screen_width = screen.width
-            screen_height = screen.height
-            
-            # 截取左侧区域
-            left_area = screen_bgr[:, :int(screen_width*0.5)]
-            
-            # 使用OCR识别文本
-            ocr_results = pytesseract.image_to_data(left_area, lang='chi_sim', 
-                                                   output_type=pytesseract.Output.DICT)
-            
-            # 查找所有"第X题"文本
-            for i, text in enumerate(ocr_results['text']):
-                match = re.search(r'第(\d+)题', text)
-                if match:
-                    question_num = int(match.group(1))
-                    x = ocr_results['left'][i]
-                    y = ocr_results['top'][i]
-                    w = ocr_results['width'][i]
-                    h = ocr_results['height'][i]
-                    conf = ocr_results['conf'][i]
-                    
-                    if conf > 60:  # 只接受置信度较高的结果
-                        # 找到题号右侧的分数输入框
-                        # 分数框通常在题号右侧并位于同一水平线附近
-                        input_box = find_score_input_near_question(question_num, x+w, y, screen_bgr)
-                        
-                        if input_box:
-                            question_numbers.append((question_num, input_box))
-                            log_message(f"找到第{question_num}题，输入框位置: {input_box}")
-            
-            # 按题号排序
-            question_numbers.sort(key=lambda x: x[0])
-            
-            return question_numbers
-        else:
-            log_message("OCR不可用或题号区域未选择，无法执行基于题号的打分")
-            return None
-    except Exception as e:
-        log_message(f"识别题号出错: {e}")
-        log_message(traceback.format_exc())
-        return None
-
-def find_score_input_near_question(question_num, start_x, start_y, screen_bgr):
-    """找到题号附近的分数输入框"""
-    try:
-        # 在当前行右侧搜索"得分："文本
-        # 这里可以用模板匹配或OCR来识别
-        if OCR_AVAILABLE:
-            # 定义搜索区域（题号右侧到屏幕右边缘）
-            height, width = screen_bgr.shape[:2]
-            search_width = min(700, width - start_x)  # 限制搜索区域宽度
-            search_height = 120  # 向下扩展一些，以防"得分"文本在题号下方
-            
-            # 确保搜索区域在屏幕内
-            search_x = max(0, start_x)
-            search_y = max(0, start_y - 30)  # 向上偏移一点以增加容错性
-            search_width = min(search_width, width - search_x)
-            search_height = min(search_height, height - search_y)
-            
-            search_area = screen_bgr[search_y:search_y+search_height, 
-                                    search_x:search_x+search_width]
-            
-            # 保存搜索区域图像，用于调试
-            search_img_path = os.path.join(IMAGE_DIR, f"search_q{question_num}.png")
-            cv2.imwrite(search_img_path, search_area)
-            
-            # 使用OCR识别文本
-            search_results = pytesseract.image_to_data(search_area, lang='chi_sim', 
-                                                     output_type=pytesseract.Output.DICT)
-            
-            # 查找"得分："文本
-            for i, text in enumerate(search_results['text']):
-                if "得分" in text:
-                    score_x = search_results['left'][i]
-                    score_y = search_results['top'][i]
-                    score_w = search_results['width'][i]
-                    score_h = search_results['height'][i]
-                    
-                    # 分数输入框通常在"得分："文本右侧
-                    input_x = search_x + score_x + score_w + 5
-                    input_y = search_y + score_y
-                    input_w = 80  # 估计宽度
-                    input_h = score_h
-                    
-                    log_message(f"第{question_num}题旁找到'得分'文本，估计输入框位置: ({input_x}, {input_y})")
-                    
-                    # 返回输入框的位置
-                    return (input_x, input_y, input_x + input_w, input_y + input_h)
-            
-            # 如果没有找到"得分："文本，尝试直接定位输入框
-            # 典型的分数输入框是一个浅色背景的矩形区域
-            # 这里可以通过边缘检测或模板匹配来找到
-            
-            # 作为后备方案，我们假设输入框在题号右侧固定距离处
-            backup_input_x = search_x + 300  # 根据页面布局估计
-            backup_input_y = start_y
-            backup_input_w = 60
-            backup_input_h = 30
-            
-            log_message(f"未找到'得分'文本，使用估计位置: ({backup_input_x}, {backup_input_y})")
-            return (backup_input_x, backup_input_y, backup_input_x + backup_input_w, backup_input_y + backup_input_h)
-        
-    except Exception as e:
-        log_message(f"寻找输入框出错: {e}")
-        return None
-
-def question_based_scoring():
-    """基于题号的智能打分主函数"""
-    global running
-    
-    try:
-        # 初始化已处理题号集合
-        processed_questions = set()
-        total_processed = 0
-        consecutive_no_new = 0
-        
-        while running:
-            # 识别当前页面上所有题号
-            question_boxes = find_all_question_numbers()
-            
-            if not question_boxes or len(question_boxes) == 0:
-                log_message("当前页面未发现题号，尝试滚动页面...")
-                pyautogui.scroll(scroll_amount)
-                time.sleep(1.0)
-                consecutive_no_new += 1
-                
-                # 如果连续多次没有发现新题号，可能已到达页面底部
-                if consecutive_no_new >= 3:
-                    log_message("连续多次未发现新题号，可能已完成所有题目")
-                    break
-                    
-                continue
-            
-            # 处理新发现的题号
-            new_found = False
-            
-            for question_num, box in question_boxes:
-                # 跳过已处理的题号
-                if question_num in processed_questions:
-                    continue
-                    
-                new_found = True
-                consecutive_no_new = 0
-                
-                log_message(f"处理第{question_num}题")
-                
-                # 计算输入框中心位置
-                left, top, right, bottom = box
-                center_x = (left + right) // 2
-                center_y = (top + bottom) // 2
-                
-                # 点击输入框
-                pyautogui.click(center_x, center_y)
-                time.sleep(0.3)
-                
-                # 输入分数
-                score = get_score_for_current_question()
-                pyautogui.write(str(score))
-                log_message(f"为第{question_num}题输入分数: {score}")
-                
-                # 按回车确认
-                time.sleep(0.2)
-                pyautogui.press('enter')
-                time.sleep(0.1)
-                
-                # 记录已处理的题号
-                processed_questions.add(question_num)
-                total_processed += 1
-            
-            # 如果当前页面没有新题号，滚动页面
-            if not new_found:
-                log_message("当前页面未发现新题号，滚动页面...")
-                pyautogui.scroll(scroll_amount)
-                time.sleep(1.0)
-                consecutive_no_new += 1
-                
-                # 如果连续多次没有发现新题号，可能已到达页面底部
-                if consecutive_no_new >= 3:
-                    log_message(f"连续多次未发现新题号，可能已完成所有题目")
-                    break
-            else:
-                # 如果有新题号被处理，继续滚动查找更多
-                log_message("继续滚动查找更多题目...")
-                pyautogui.scroll(scroll_amount)
-                time.sleep(1.0)
-        
-        log_message(f"基于题号的智能打分已完成，共处理{total_processed}道题目")
-        
-        # 点击提交按钮
-        if total_processed > 0 and running:
-            log_message("准备提交所有评分...")
-            click_final_submit()
-            
-        # 恢复按钮状态
-        if running:
-            running = False
-            root.after(0, lambda: btn_start_multipage.config(text="开始多题目打分", bg="purple"))
-            root.after(0, lambda: status_label.config(text="状态：已完成智能打分"))
-            
-    except Exception as e:
-        log_message(f"基于题号的智能打分出错: {e}")
-        log_message(traceback.format_exc())
-        
-        # 恢复按钮状态
-        running = False
-        root.after(0, lambda: btn_start_multipage.config(text="开始多题目打分", bg="purple"))
-        root.after(0, lambda: status_label.config(text="状态：出错"))
-
-def question_based_scoring_without_ocr():
-    """不依赖OCR的智能打分函数 - 连续处理多批次"""
-    global running, current_question, score_input_rect
+def simplified_scoring():
+    """智能打分函数 - 使用模板匹配搜索下一个分数框，固定滚动量避免跳过题目"""
+    global running, score_input_rect
     
     try:
         if not score_input_selected:
@@ -1494,127 +1259,226 @@ def question_based_scoring_without_ocr():
             
         # 外部循环 - 处理多批次题目
         batch_count = 0
-        total_all_batches = 0
+        total_processed = 0
+        
+        # 获取分数输入框作为模板
+        left, top, right, bottom = score_input_rect
+        template_width = right - left
+        template_height = bottom - top
+        
+        # 创建模板图像
+        template = pyautogui.screenshot(region=(left, top, template_width, template_height))
+        template = np.array(template)
+        template = cv2.cvtColor(template, cv2.COLOR_RGB2BGR)
+        
+        # 保存模板图像，用于调试
+        template_path = os.path.join(IMAGE_DIR, "score_input_template.png")
+        cv2.imwrite(template_path, template)
+        log_message(f"已创建分数框模板: {template_path}")
+        
+        # 记录已处理的位置
+        processed_positions = []
+        
+        # 统计连续找不到新分数框的次数
+        consecutive_no_find = 0
+        
+        # 使用固定滚动量
+        fixed_scroll = scroll_amount
+        log_message(f"使用固定滚动量: {fixed_scroll}")
+        
+        # 上次找到分数框的位置
+        last_found_positions = []
         
         while running:
-            log_message(f"======= 开始处理第 {batch_count+1} 批题目 =======")
+            # 截取当前屏幕
+            screen = pyautogui.screenshot()
+            screen_np = np.array(screen)
+            screen_bgr = cv2.cvtColor(screen_np, cv2.COLOR_RGB2BGR)
             
-            # 保存已处理的位置，每批次重置
-            processed_positions = []
+            # 模板匹配查找所有分数输入框
+            result = cv2.matchTemplate(screen_bgr, template, cv2.TM_CCOEFF_NORMED)
+            threshold = 0.75  # 较低的阈值以提高检测率
             
-            # 获取分数输入框模板 - 每批次重新截取
-            left, top, right, bottom = score_input_rect
-            template = pyautogui.screenshot(region=(left, top, right-left, bottom-top))
-            template = np.array(template)
-            template = cv2.cvtColor(template, cv2.COLOR_RGB2BGR)
-            template_width = right - left
-            template_height = bottom - top
+            # 找到所有匹配位置
+            locations = np.where(result >= threshold)
+            points = list(zip(*locations[::-1]))  # (x,y)坐标列表
             
-            consecutive_no_find = 0
-            total_processed = 0
+            # 过滤重复的检测点
+            filtered_points = []
+            for x, y in points:
+                # 检查是否与已有点太近
+                too_close = False
+                for fx, fy in filtered_points:
+                    if abs(x - fx) < 20 and abs(y - fy) < 20:
+                        too_close = True
+                        break
+                if not too_close:
+                    filtered_points.append((x, y))
             
-            # 内部循环 - 处理当前批次的所有题目
-            while running and consecutive_no_find < 5:
-                # 截取当前屏幕
-                screen = pyautogui.screenshot()
-                screen_np = np.array(screen)
-                screen_bgr = cv2.cvtColor(screen_np, cv2.COLOR_RGB2BGR)
+            # 按垂直位置排序
+            filtered_points.sort(key=lambda pt: pt[1])
+            
+            # 当前页面检测到的分数框位置
+            current_detected = [(x, y) for x, y in filtered_points]
+            
+            # 日志记录检测到的分数框
+            log_message(f"当前页面检测到 {len(filtered_points)} 个可能的分数框")
+            
+            # 检查是否所有检测到的框都已处理过
+            all_processed = True
+            for x, y in filtered_points:
+                is_processed = False
+                for px, py in processed_positions:
+                    if abs(x - px) < 50 and abs(y - py) < 50:
+                        is_processed = True
+                        break
+                if not is_processed:
+                    all_processed = False
+                    break
+            
+            # 如果当前页面上所有的框都已处理，但检测到框的数量 > 0
+            # 可能是因为页面滚动不足或processed_positions记录有误
+            if all_processed and len(filtered_points) > 0:
+                log_message("检测到框但都已处理，可能需要清除历史记录")
                 
-                # 模板匹配查找所有分数输入框
-                result = cv2.matchTemplate(screen_bgr, template, cv2.TM_CCOEFF_NORMED)
-                threshold = 0.8
-                
-                # 找到所有匹配位置
-                locations = np.where(result >= threshold)
-                points = list(zip(*locations[::-1]))  # (x,y)坐标列表
-                
-                # 按垂直位置排序 - 确保从上到下处理
-                points.sort(key=lambda pt: pt[1])
-                
-                # 查找未处理的框
-                found_new = False
-                
-                for pt in points:
-                    x, y = pt
+                # 比较当前检测到的框与上次检测的框
+                same_as_last = False
+                if len(last_found_positions) > 0:
+                    # 检查是否与上次检测的位置相同
+                    same_count = 0
+                    for curr_x, curr_y in current_detected:
+                        for last_x, last_y in last_found_positions:
+                            if abs(curr_x - last_x) < 20 and abs(curr_y - last_y) < 20:
+                                same_count += 1
+                                break
                     
-                    # 跳过已处理的位置 - 严格检查
-                    is_processed = False
-                    for px, py in processed_positions:
-                        # 使用更严格的距离判断
-                        if abs(x - px) < template_width/2 and abs(y - py) < template_height/2:
-                            is_processed = True
-                            break
-                    
-                    if not is_processed:
-                        # 找到一个未处理的框
-                        center_x = x + template_width // 2
-                        center_y = y + template_height // 2
-                        
-                        log_message(f"处理分数框 #{total_processed+1}, 位置: ({center_x}, {center_y})")
-                        
-                        # 点击输入框
-                        pyautogui.click(center_x, center_y)
-                        time.sleep(0.4)  # 稍微增加等待时间，确保点击生效
-                        
-                        # 输入分数
-                        score = get_score_for_current_question()
-                        pyautogui.write(str(score))
-                        log_message(f"输入分数: {score}")
-                        time.sleep(0.3)
-                        
-                        # 确认输入 - 按回车键
-                        pyautogui.press('enter')
-                        time.sleep(0.2)
-                        
-                        # 记录已处理位置
-                        processed_positions.append((x, y))
-                        total_processed += 1
-                        found_new = True
-                        
-                        # 重要：每次只处理一个分数框，然后滚动
+                    # 如果大部分框与上次相同，可能是滚动不足
+                    if same_count >= min(len(current_detected), len(last_found_positions)) * 0.7:
+                        same_as_last = True
+                        log_message("当前页面与上次相似，增加滚动量")
+                        # 增加一次滚动量
+                        pyautogui.scroll(fixed_scroll * 2)
+                        time.sleep(1.0)
+                        consecutive_no_find += 1
+                        continue
+                
+                # 如果连续多次没找到新框，可能是页面变化或已到底部
+                consecutive_no_find += 1
+                if consecutive_no_find >= 3:
+                    log_message("连续多次未发现新分数框，尝试重置已处理位置记录")
+                    processed_positions = []  # 清空已处理记录，重新开始检测
+                    consecutive_no_find = 0
+                    continue
+            
+            # 更新上次检测到的位置
+            last_found_positions = current_detected.copy()
+            
+            # 查找未处理的框
+            found_new = False
+            
+            for pt in filtered_points:
+                x, y = pt
+                
+                # 跳过已处理的位置
+                is_processed = False
+                for px, py in processed_positions:
+                    if abs(x - px) < 50 and abs(y - py) < 50:  # 使用较大距离容差
+                        is_processed = True
                         break
                 
-                # 是否找到新的框决定下一步操作
-                if found_new:
-                    log_message("已处理一个分数框，滚动页面继续...")
-                    consecutive_no_find = 0
-                else:
-                    log_message("当前页面未找到新的分数框，滚动页面...")
-                    consecutive_no_find += 1
-                    if consecutive_no_find >= 3:
-                        log_message("连续多次未找到新分数框，当前批次可能已完成")
-                
-                # 无论是否找到，都滚动到下一个
-                pyautogui.scroll(scroll_amount)
-                time.sleep(1.2)  # 增加等待时间，确保页面完全加载
-            
-            log_message(f"当前批次打分完成，共处理 {total_processed} 个分数框")
-            total_all_batches += total_processed
-            
-            # 点击提交按钮
-            if total_processed > 0 and running:
-                log_message("准备提交当前批次...")
-                if click_final_submit():
-                    batch_count += 1
-                    log_message(f"已完成 {batch_count} 批次，总计评分 {total_all_batches} 题")
-                    time.sleep(2.0)  # 等待页面完全加载
-                else:
-                    log_message("提交失败，停止处理")
+                if not is_processed:
+                    # 找到一个未处理的框
+                    center_x = x + template_width // 2
+                    center_y = y + template_height // 2
+                    
+                    log_message(f"处理分数框 #{total_processed+1}, 位置: ({center_x}, {center_y})")
+                    
+                    # 点击分数框
+                    pyautogui.click(center_x, center_y)
+                    time.sleep(0.5)  # 等待点击生效
+                    
+                    # 输入分数
+                    score = get_score_for_current_question()
+                    pyautogui.write(str(score))
+                    log_message(f"输入分数: {score}")
+                    time.sleep(0.3)
+                    
+                    # 按回车确认
+                    pyautogui.press('enter')
+                    time.sleep(0.3)
+                    
+                    # 记录已处理位置
+                    processed_positions.append((x, y))
+                    total_processed += 1
+                    found_new = True
+                    consecutive_no_find = 0  # 重置计数器
+                    
+                    # 只处理一个分数框，然后进行一次滚动
                     break
+            
+            # 是否找到新的框决定下一步操作
+            if found_new:
+                log_message("已处理一个分数框，滚动页面继续搜索...")
+                
+                # 使用固定滚动量
+                pyautogui.scroll(fixed_scroll)
+                time.sleep(1.0)  # 等待页面滚动稳定
             else:
-                # 如果没有处理任何框，可能是已经全部完成
-                log_message("本批次未找到可处理的题目，可能已全部完成")
-                if batch_count == 0:
-                    # 如果第一批就没找到，可能是初始选择有问题
-                    log_message("未能找到任何可处理的分数框，请检查选择的模板")
-                break
+                log_message("当前页面未找到未处理的分数框")
+                consecutive_no_find += 1
+                
+                # 连续多次未找到新分数框
+                if consecutive_no_find >= 5:
+                    log_message("连续多次未找到新分数框，尝试提交当前批次...")
+                    
+                    # 尝试清除已处理记录，再次尝试
+                    if consecutive_no_find == 5:
+                        log_message("清除已处理记录，再次尝试...")
+                        processed_positions = []
+                        pyautogui.scroll(fixed_scroll)
+                        time.sleep(1.0)
+                        continue
+                        
+                    # 尝试点击提交按钮
+                    if click_final_submit():
+                        batch_count += 1
+                        log_message(f"已完成第 {batch_count} 批，总计评分 {total_processed} 题")
+                        
+                        # 重置变量，准备处理下一批
+                        consecutive_no_find = 0
+                        processed_positions = []
+                        
+                        # 等待页面加载
+                        time.sleep(3.0)
+                        continue
+                    else:
+                        log_message("提交失败或无法继续，停止处理")
+                        break
+                
+                # 尝试滚动寻找更多分数框
+                log_message(f"使用固定滚动量 {fixed_scroll} 继续寻找...")
+                pyautogui.scroll(fixed_scroll)
+                time.sleep(1.0)  # 等待页面滚动稳定
         
-        log_message(f"=== 多批次处理结束，共完成 {batch_count} 批次，总计 {total_all_batches} 题 ===")
+        log_message(f"===== 打分结束，共完成 {batch_count} 批次，总计 {total_processed} 题 =====")
+        
+        # 恢复按钮状态
+        if running:
+            running = False
+            root.after(0, lambda: btn_start_multipage.config(text="开始滚动式打分", bg="purple"))
+            root.after(0, lambda: status_label.config(text="状态：已完成智能打分"))
+        
         return True
         
     except Exception as e:
-        log_message(f"连续批次打分出错: {e}")
+        log_message(f"智能打分出错: {e}")
         log_message(traceback.format_exc())
+        
+        # 恢复按钮状态
+        running = False
+        root.after(0, lambda: btn_start_multipage.config(text="开始滚动式打分", bg="purple"))
+        root.after(0, lambda: status_label.config(text="状态：出错"))
+        
         return False
 
 # 创建置顶窗口
@@ -1676,8 +1540,8 @@ multi_frame = tk.Frame(root)
 multi_frame.pack(pady=5)
 
 # 添加选择分数输入框区域按钮
-btn_select_score_input = tk.Button(multi_frame, text="选择分数输入框", command=select_score_input_area, 
-                                 bg="blue", fg="white", width=12, height=1)
+btn_select_score_input = tk.Button(multi_frame, text="选择固定分数框位置", command=select_score_input_area, 
+                                 bg="blue", fg="white", width=15, height=1)
 btn_select_score_input.pack(side=tk.LEFT, padx=5)
 
 # 添加选择最终提交按钮区域按钮
@@ -1690,14 +1554,9 @@ btn_set_scroll = tk.Button(multi_frame, text="设置滚动量", command=set_scro
                           bg="blue", fg="white", width=10, height=1)
 btn_set_scroll.pack(side=tk.LEFT, padx=5)
 
-# 添加选择题号区域按钮
-btn_select_question = tk.Button(multi_frame, text="选择题号区域", command=select_question_number_area, 
-                               bg="blue", fg="white", width=12, height=1)
-btn_select_question.pack(side=tk.LEFT, padx=5)
-
-# 修改开始多题目按钮，使用基于题号的方法
-btn_start_multipage = tk.Button(multi_frame, text="开始多题目打分", command=toggle_improved_scoring, 
-                              bg="purple", fg="white", width=12, height=1)
+# 删除选择题号区域按钮，直接添加多题目打分按钮
+btn_start_multipage = tk.Button(multi_frame, text="开始滚动式打分", command=toggle_improved_scoring, 
+                              bg="purple", fg="white", width=15, height=1)
 btn_start_multipage.pack(side=tk.LEFT, padx=5)
 
 # 关闭窗口时清理资源

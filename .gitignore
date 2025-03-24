@@ -175,3 +175,5 @@ cython_debug/
 
 # 图像文件
 *.png
+
+*.json
