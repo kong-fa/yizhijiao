@@ -19,6 +19,11 @@ import sys
 # 全局变量控制运行状态
 running = False
 
+# 创建图片存储目录
+IMAGE_DIR = "image"
+if not os.path.exists(IMAGE_DIR):
+    os.makedirs(IMAGE_DIR)
+
 # 用于存储两个区域的坐标
 score_area_rect = None       # 分数输入区域
 submit_area_rect = None      # 提交按钮区域
@@ -157,10 +162,11 @@ def select_score_area():
         score_area_rect = (left, top, right, bottom)
         score_area_selected = True
         
-        # 保存区域截图
-        cv2.imwrite("score_area.png", region_img)
+        # 保存区域截图到image文件夹
+        score_img_path = os.path.join(IMAGE_DIR, "score_area.png")
+        cv2.imwrite(score_img_path, region_img)
         log_message(f"已设置分数区域: 左={left}, 上={top}, 右={right}, 下={bottom}")
-        log_message("已保存分数区域截图到 score_area.png")
+        log_message(f"已保存分数区域截图到 {score_img_path}")
         
         # 更新按钮状态
         btn_select_score.config(bg="green")
@@ -184,10 +190,11 @@ def select_submit_area():
         submit_area_rect = (left, top, right, bottom)
         submit_area_selected = True
         
-        # 保存区域截图
-        cv2.imwrite("submit_area.png", region_img)
+        # 保存区域截图到image文件夹
+        submit_img_path = os.path.join(IMAGE_DIR, "submit_area.png")
+        cv2.imwrite(submit_img_path, region_img)
         log_message(f"已设置提交按钮区域: 左={left}, 上={top}, 右={right}, 下={bottom}")
-        log_message("已保存提交按钮区域截图到 submit_area.png")
+        log_message(f"已保存提交按钮区域截图到 {submit_img_path}")
         
         # 更新按钮状态
         btn_select_submit.config(bg="green")
@@ -298,7 +305,9 @@ def start_grading():
                 log_message("尝试输入100分...")
                 if enter_score():
                     status_label.config(text="状态：已输入100分")
-                    time.sleep(1)
+                    # 检查是否暂停
+                    if not check_running(1):
+                        break
                 else:
                     log_message("未能输入分数，尝试直接提交")
                 
@@ -307,11 +316,14 @@ def start_grading():
                 if find_and_click_submit_button():
                     log_message("已点击提交按钮，完成一次批改")
                     status_label.config(text="状态：已提交，等待下一个...")
-                    time.sleep(5)  # 将等待时间设为5秒，确保页面完全刷新
+                    # 使用分段等待代替单个长等待
+                    if not check_running(5):  # 将5秒等待拆分成多个小等待
+                        break
                     log_message("页面刷新等待完成，准备处理下一个")
                 else:
                     log_message("未能点击提交按钮，跳过当前项目")
-                    time.sleep(2)
+                    if not check_running(2):
+                        break
                     continue
                 
             except Exception as e:
@@ -319,10 +331,12 @@ def start_grading():
                 log_message(error_msg)
                 log_message(traceback.format_exc())
                 status_label.config(text=f"状态：发生错误")
-                time.sleep(2)
+                if not check_running(2):
+                    break
             
             # 每次批改完成后暂停一下，避免过快操作
-            time.sleep(1)
+            if not check_running(1):
+                break
     
     except Exception as e:
         error_msg = f"发生严重错误：{e}"
@@ -332,6 +346,15 @@ def start_grading():
         btn_toggle.config(text="开始", bg="green")
         status_label.config(text="状态：已暂停")
         running = False
+
+def check_running(seconds):
+    """分段等待并检查running状态"""
+    global running
+    for _ in range(int(seconds * 10)):  # 将秒拆分成0.1秒的间隔
+        if not running:
+            return False
+        time.sleep(0.1)
+    return running
 
 def on_closing():
     global running
