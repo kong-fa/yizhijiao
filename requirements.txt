@@ -1,0 +1,6 @@
+selenium==4.15.2
+webdriver-manager==4.0.1
+pillow==10.1.0
+opencv-python==4.8.1.78
+pyautogui==0.9.54
+numpy==1.26.2 
